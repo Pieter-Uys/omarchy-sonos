@@ -28,7 +28,7 @@ volume) and **sources** underneath, meaning where the sound comes from:
 |--------|--------------|
 | **Favorites** | Your Sonos Favorites. Each row shows its service (TuneIn, Sonos Radio, Album…) so duplicates are easy to tell apart. Ones that can't play are dimmed with the reason: a folder, an old stream that's offline, or a music service that needs signing in again in the Sonos app (learned the first time it fails). |
 | **TV** (home-theatre players: Beam, Arc, Ray, Playbar…) | Switch to the TV input and back to what played before, plus Night Sound and Speech Enhancement. |
-| **This PC** (needs AirPlay, see below) | A switch per app playing sound on your PC, to send just that app to the Sonos. |
+| **This PC** (needs AirPlay, see below) | A switch per app playing sound on your PC, to send just that app to the Sonos. While it plays, the player shows the app's own track (e.g. Spotify's title and artist), and the play, pause and skip buttons control the app itself. |
 
 **Full or Minimal**: the button in the panel's header switches layout, and the
 choice is saved. *Full* shows the sources as tabs and opens on the one that

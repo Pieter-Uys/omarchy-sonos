@@ -16,6 +16,7 @@ $XDG_CACHE_HOME/sonos/players.json so later calls skip discovery.
       night <0|1> | speech <0|1> | seek <seconds> | favorite <index>
   sonos apps <group-id>             JSON: apps playing audio on this PC, and
                                     whether each one goes to the group over AirPlay
+  sonos pc <app> <play-pause|next|previous>  control the app itself (MPRIS)
   sonos send <group-id> <app> <0|1> send one app's audio to the group (1) or back
                                     to this PC's default output (0); WirePlumber
                                     remembers the choice for that app
@@ -648,6 +649,77 @@ def app_name(stream):
     return clean(props.get("application.name") or props.get("application.process.binary"), 60)
 
 
+# Media info and controls for an app, over MPRIS on the session D-Bus (busctl
+# ships with systemd). AirPlay carries no track details, so the panel shows
+# what the app itself reports.
+MPRIS = "org.mpris.MediaPlayer2."
+MPRIS_PATH = "/org/mpris/MediaPlayer2"
+MPRIS_PLAYER = "org.mpris.MediaPlayer2.Player"
+MPRIS_METHODS = {"play-pause": "PlayPause", "next": "Next", "previous": "Previous"}
+
+
+def busctl(*args):
+    try:
+        out = subprocess.run(["busctl", "--user", "--json=short"] + list(args), capture_output=True,
+                             text=True, timeout=3, check=False)
+        return json.loads(out.stdout[:MAX_BODY]) if out.returncode == 0 and out.stdout else None
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+
+
+def mpris_players():
+    res = busctl("call", "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "ListNames")
+    try:
+        names = res["data"][0]
+    except (TypeError, KeyError, IndexError):
+        return []
+    return [n for n in names if isinstance(n, str) and n.startswith(MPRIS)][:32]
+
+
+def mpris_for(app):
+    """The MPRIS bus name of an app: "Spotify" -> org.mpris.MediaPlayer2.spotify,
+    "Brave" -> org.mpris.MediaPlayer2.brave.instance123."""
+    want = re.sub(r"[^a-z0-9]", "", app.lower())
+    if not want:
+        return None
+    for name in mpris_players():
+        if re.sub(r"[^a-z0-9]", "", name[len(MPRIS):].split(".")[0].lower()) == want:
+            return name
+    return None
+
+
+def mpris_track(bus):
+    meta = busctl("get-property", bus, MPRIS_PATH, MPRIS_PLAYER, "Metadata")
+    status = busctl("get-property", bus, MPRIS_PATH, MPRIS_PLAYER, "PlaybackStatus")
+    try:
+        d = meta["data"]
+        val = lambda k: (d.get(k) or {}).get("data")
+        artist = val("xesam:artist")
+        artist = ", ".join(clean(a, 60) for a in artist[:4]) if isinstance(artist, list) else clean(artist)
+        st = status["data"] if status else ""
+        return {
+            "title": clean(val("xesam:title")),
+            "artist": clean(artist),
+            "album": clean(val("xesam:album")),
+            "status": st if st in ("Playing", "Paused", "Stopped") else "",
+        }
+    except (TypeError, KeyError, AttributeError):
+        return None
+
+
+def cmd_pc_control(name, command):
+    bus = mpris_for(name)
+    if not bus or command not in MPRIS_METHODS:
+        raise SoapFault("%s has no media controls" % name)
+    try:
+        ok = subprocess.run(["busctl", "--user", "call", bus, MPRIS_PATH, MPRIS_PLAYER, MPRIS_METHODS[command]],
+                            capture_output=True, timeout=3, check=False).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        ok = False
+    if not ok:
+        raise SoapFault("%s did not respond" % name)
+
+
 def cmd_apps(group_id):
     sink = sonos_sink(group_id)
     if not sink:
@@ -666,6 +738,11 @@ def cmd_apps(group_id):
             a["onSonos"] = True
         if not st.get("corked"):
             a["playing"] = True
+    for a in apps.values():
+        bus = mpris_for(a["name"]) if a["onSonos"] else None
+        track = mpris_track(bus) if bus else None
+        if track and track["title"]:
+            a["track"] = track
     return {"ok": True, "sink": clean(sink.get("description"), 60),
             "apps": sorted(apps.values(), key=lambda a: a["name"].lower())}
 
@@ -774,6 +851,9 @@ def main(argv):
             return 0
         if cmd == "send" and len(argv) == 4 and GROUP_ID.match(argv[1]):
             cmd_send(argv[1], clean(argv[2], 60), flag(argv[3]))
+            return 0
+        if cmd == "pc" and len(argv) == 3:
+            cmd_pc_control(clean(argv[1], 60), argv[2])
             return 0
         if cmd == "favorites":
             print(json.dumps(cmd_favorites()))

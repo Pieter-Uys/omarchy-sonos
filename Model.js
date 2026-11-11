@@ -216,7 +216,14 @@ function parseApps(raw) {
     var a = v.apps[i] || {}
     var name = text(a.name, 60)
     if (name === "") continue
-    out.apps.push({ name: name, onSonos: a.onSonos === true, playing: a.playing === true })
+    var t = a.track && typeof a.track === "object" ? a.track : null
+    var track = t && text(t.title) !== "" ? {
+      title: text(t.title),
+      artist: text(t.artist),
+      album: text(t.album),
+      status: ["Playing", "Paused", "Stopped"].indexOf(t.status) >= 0 ? t.status : ""
+    } : null
+    out.apps.push({ name: name, onSonos: a.onSonos === true, playing: a.playing === true, track: track })
   }
   out.ok = true
   out.sink = text(v.sink, 60)
@@ -248,4 +255,18 @@ function sourceKind(g) {
   if (g.source === "radio") return "radio"
   if (g.source === "queue") return "queue"
   return g.source === "none" ? "" : g.source
+}
+
+// During AirPlay from this PC, the app sending to the Sonos and what it plays:
+// the playing one first, else any with track details. null when none.
+function pcTrack(g, pcAudio) {
+  if (!g || g.source !== "airplay" || !pcAudio || !pcAudio.ok) return null
+  var best = null
+  for (var i = 0; i < pcAudio.apps.length; i++) {
+    var a = pcAudio.apps[i]
+    if (!a.onSonos || !a.track) continue
+    if (a.track.status === "Playing") return { app: a.name, track: a.track }
+    if (!best) best = { app: a.name, track: a.track }
+  }
+  return best
 }

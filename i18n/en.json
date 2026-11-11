@@ -62,5 +62,7 @@
   "favSignedOut": "Sign in on Sonos",
   "favFailed": "Didn't play",
   "favFolderNotice": "%1 is a folder, so there's nothing to play. Open it in the Sonos app.",
-  "favOfflineNotice": "%1 points to a stream that isn't running any more."
+  "favOfflineNotice": "%1 points to a stream that isn't running any more.",
+  "airplayFrom": "AirPlay from %1",
+  "pcControlError": "That app didn't respond to the play controls."
 }

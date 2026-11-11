@@ -117,7 +117,7 @@ test("parses the apps that can play on the Sonos", () => {
   assert.strictEqual(a.ok, true)
   assert.strictEqual(a.sink, "TV Room")
   assert.strictEqual(a.apps.length, 2)
-  assert.deepStrictEqual(plain(a.apps[0]), { name: "Spotify", onSonos: true, playing: true })
+  assert.deepStrictEqual(plain(a.apps[0]), { name: "Spotify", onSonos: true, playing: true, track: null })
   assert.strictEqual(a.apps[1].onSonos, false)
   assert.strictEqual(M.parseApps("nope").ok, false)
   assert.strictEqual(M.parseApps(JSON.stringify({ ok: false, apps: [] })).ok, false)
@@ -145,4 +145,19 @@ test("opens on the source tab that matches what is playing", () => {
   assert.strictEqual(M.tabFor(group({ source: "airplay" }), true, false), "favorites")
   assert.strictEqual(M.tabFor(group({ source: "radio" }), true, true), "favorites")
   assert.strictEqual(M.tabFor(null, true, true), "favorites")
+})
+
+test("during AirPlay, shows what the app sending to the Sonos is playing", () => {
+  const apps = M.parseApps(JSON.stringify({ ok: true, sink: "TV Room", apps: [
+    { name: "Brave", onSonos: false, track: { title: "Video", status: "Playing" } },
+    { name: "Spotify", onSonos: true, track: { title: "Ride", artist: "Mako Road", album: "<i>x</i>", status: "Playing" } }
+  ] }))
+  const airplay = M.parseStatus(status(group({ source: "airplay", title: "", artist: "", album: "" }))).groups[0]
+  const now = M.pcTrack(airplay, apps)
+  assert.strictEqual(now.app, "Spotify")
+  assert.strictEqual(now.track.title, "Ride")
+  assert.strictEqual(now.track.album, "<i>x</i>")
+  assert.strictEqual(M.pcTrack(group({ source: "radio" }), apps), null)
+  const bad = M.parseApps(JSON.stringify({ ok: true, apps: [{ name: "X", onSonos: true, track: { title: "", status: "Exploding" } }] }))
+  assert.strictEqual(bad.apps[0].track, null)
 })

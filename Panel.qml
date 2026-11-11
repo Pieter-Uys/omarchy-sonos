@@ -107,6 +107,21 @@ Panel {
     appsProc.running = true
   }
 
+  // Play/pause/skip the app on this PC that is sending to the Sonos.
+  function pcControl(command) {
+    if (!root.pcNow || pcControlProc.running) return
+    if (command === "play-pause") {
+      var apps = root.pcAudio.apps.map(function(a) {
+        if (a.name !== root.pcNow.app || !a.track) return a
+        var t = Object.assign({}, a.track, { status: a.track.status === "Playing" ? "Paused" : "Playing" })
+        return Object.assign({}, a, { track: t })
+      })
+      root.pcAudio = Object.assign({}, root.pcAudio, { apps: apps })
+    }
+    pcControlProc.command = ["python3", "-I", root.helperPath, "pc", root.pcNow.app, command]
+    pcControlProc.running = true
+  }
+
   property var sendQueue: []
   function sendApp(name, on) {
     if (!root.group) return
@@ -282,6 +297,21 @@ Panel {
   }
 
   Process {
+    id: pcControlProc
+    onExited: function(exitCode) {
+      if (exitCode !== 0) { root.notice = strings.t("pcControlError"); noticeTimer.restart() }
+      pcRefreshTimer.restart()
+    }
+  }
+
+  // Track changes take the app a moment to report.
+  Timer {
+    id: pcRefreshTimer
+    interval: 400
+    onTriggered: root.refreshApps()
+  }
+
+  Process {
     id: sendProc
     onExited: function(exitCode) {
       if (exitCode !== 0) {
@@ -341,7 +371,10 @@ Panel {
     return strings.t("stopped")
   }
 
+  readonly property var pcNow: Model.pcTrack(root.group, root.pcAudio)
+
   function headline() {
+    if (root.pcNow) return root.pcNow.track.title
     var np = root.nowPlaying
     if (np.kind === "tv") return strings.t("tv")
     if (np.kind === "linein") return strings.t("lineIn")
@@ -447,6 +480,10 @@ Panel {
     var g = root.group
     if (!g) return ""
     var state = root.stateText(root.current("state"))
+    if (root.pcNow) {
+      var st = root.pcNow.track.status === "Paused" ? strings.t("paused") : state
+      return st + " · " + strings.t("airplayFrom").arg(root.pcNow.app)
+    }
     var kind = Model.sourceKind(g)
     // TV, line-in and bare AirPlay already name the source in the title.
     if (kind === "radio") return state + " · " + strings.t("sourceRadio")
@@ -489,9 +526,10 @@ Panel {
       implicitHeight: column.implicitHeight
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
-      onActivateRequested: root.togglePlay()
+      onActivateRequested: root.pcNow ? root.pcControl("play-pause") : root.togglePlay()
       onMoveRequested: function(dx, dy) {
         if (dy !== 0) root.nudgeVolume(-dy)
+        else if (dx !== 0 && root.pcNow) root.pcControl(dx > 0 ? "next" : "previous")
         else if (dx !== 0 && Model.canSkip(root.group)) root.action(dx > 0 ? "next" : "previous")
       }
 
@@ -615,7 +653,9 @@ Panel {
 
             PlainText {
               width: parent.width
-              text: root.nowPlaying.kind === "idle" ? strings.t("pickFavorite") : root.nowPlaying.subtitle
+              text: root.pcNow
+                ? [root.pcNow.track.artist, root.pcNow.track.album].filter(function(x) { return x !== "" }).join(" — ")
+                : (root.nowPlaying.kind === "idle" ? strings.t("pickFavorite") : root.nowPlaying.subtitle)
               visible: text !== ""
               opacity: 0.7
               font.pixelSize: Style.font.bodySmall
@@ -687,21 +727,23 @@ Panel {
             tooltipText: strings.t("previous")
             foreground: root.fg
             accent: root.accent
-            enabled: Model.canSkip(root.group)
+            enabled: Model.canSkip(root.group) || !!root.pcNow
             opacity: enabled ? 1 : 0.4
-            onClicked: root.action("previous")
+            onClicked: root.pcNow ? root.pcControl("previous") : root.action("previous")
           }
 
           Button {
-            iconText: root.current("state") === "PLAYING" ? root.glyphPause : root.glyphPlay
-            tooltipText: root.current("state") === "PLAYING" ? strings.t("pause") : strings.t("play")
+            readonly property bool isPlaying: root.pcNow
+              ? root.pcNow.track.status === "Playing" : root.current("state") === "PLAYING"
+            iconText: isPlaying ? root.glyphPause : root.glyphPlay
+            tooltipText: isPlaying ? strings.t("pause") : strings.t("play")
             foreground: root.fg
             accent: root.accent
             iconSize: Style.font.iconLarge
             horizontalPadding: Style.spacing.panelGap
             enabled: !!root.group && root.group.source !== "none"
             opacity: enabled ? 1 : 0.4
-            onClicked: root.togglePlay()
+            onClicked: root.pcNow ? root.pcControl("play-pause") : root.togglePlay()
           }
 
           Button {
@@ -709,9 +751,9 @@ Panel {
             tooltipText: strings.t("next")
             foreground: root.fg
             accent: root.accent
-            enabled: Model.canSkip(root.group)
+            enabled: Model.canSkip(root.group) || !!root.pcNow
             opacity: enabled ? 1 : 0.4
-            onClicked: root.action("next")
+            onClicked: root.pcNow ? root.pcControl("next") : root.action("next")
           }
         }
 
