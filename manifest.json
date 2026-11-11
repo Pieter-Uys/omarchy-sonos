@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 1,
+  "id": "pieter.sonos",
+  "name": "Sonos",
+  "version": "1.1.0",
+  "author": "Pieter",
+  "license": "MIT",
+  "description": "Control the Sonos speakers on your network from the bar: now playing, play/pause, skip, volume, TV input, Night Sound and Speech Enhancement, and one-click Sonos Favorites. Talks only to players on the local network (UPnP, port 1400); no Sonos account or cloud. Polls the players every few seconds.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Sonos",
+    "description": "Sonos controller: now playing, volume, home-theatre settings and favorites. Middle-click plays/pauses, right-click mutes, scroll changes volume.",
+    "category": "Media",
+    "allowMultiple": false,
+    "defaultSection": "tray",
+    "defaults": {
+      "room": "",
+      "volumeStep": 2,
+      "refreshIntervalSec": 10
+    },
+    "schema": [
+      {
+        "key": "room",
+        "type": "string",
+        "label": "Preferred room",
+        "defaultValue": "",
+        "description": "Room to show when several are available. Leave empty to follow whichever is playing."
+      },
+      {
+        "key": "volumeStep",
+        "type": "integer",
+        "label": "Volume step",
+        "min": 1,
+        "max": 10,
+        "step": 1,
+        "defaultValue": 2,
+        "description": "How much one scroll notch changes the volume."
+      },
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Background refresh (seconds)",
+        "min": 2,
+        "max": 120,
+        "step": 1,
+        "defaultValue": 10,
+        "description": "How often the bar icon checks the speakers while the panel is closed. The open panel refreshes every 2 seconds."
+      }
+    ]
+  }
+}

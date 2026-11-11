@@ -1,0 +1,728 @@
+#!/usr/bin/env python3
+"""Local Sonos control for the pieter.sonos bar widget.
+
+Talks only to Sonos players on the local network, over their UPnP control
+port (1400). No cloud account, no internet access. Players are found with
+mDNS (avahi-browse), falling back to SSDP, and remembered in
+$XDG_CACHE_HOME/pieter.sonos/players.json so later calls skip discovery.
+
+  sonos status                      JSON: every room group and what it is doing
+  sonos favorites                   JSON: the household's Sonos Favorites
+  sonos <action> <group-id> [arg]   control a group by its coordinator id:
+      play | pause | toggle | next | previous
+      tv          switch to the TV input, remembering what was playing
+      music       leave the TV input: resume what played before, else the queue
+      volume <0-100> | volume-rel <-100..100> | mute <0|1>
+      night <0|1> | speech <0|1> | seek <seconds> | favorite <index>
+  sonos apps <group-id>             JSON: apps playing audio on this PC, and
+                                    whether each one goes to the group over AirPlay
+  sonos send <group-id> <app> <0|1> send one app's audio to the group (1) or back
+                                    to this PC's default output (0); WirePlumber
+                                    remembers the choice for that app
+
+Exit status: 0 ok, 1 usage, 2 player unreachable, 3 player refused,
+4 the favorite's music service refused (signed out, missing or gone),
+5 nothing to resume when leaving the TV input.
+
+Every value sent to a player is XML-escaped; nothing is passed to a shell.
+"""
+
+import concurrent.futures
+import ipaddress
+import json
+import os
+import re
+import socket
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+import xml.etree.ElementTree as ET
+from xml.sax.saxutils import escape
+
+PORT = 1400
+TIMEOUT = 2.5
+# Loading a favorite makes the player contact the music service first.
+SLOW_TIMEOUT = 12
+# UPnP errors a player gives when a favorite's music service can't be used
+# (account signed out or missing, service gone, item no longer available).
+SERVICE_ERRORS = {"402", "701", "711", "714", "800", "804"}
+MAX_BODY = 512 * 1024
+MAX_TEXT = 200
+MAX_GROUPS = 32
+MAX_FAVORITES = 50
+GROUP_ID = re.compile(r"^RINCON_[0-9A-F]{12}\d{5}$")
+
+AVT = ("/MediaRenderer/AVTransport/Control", "urn:schemas-upnp-org:service:AVTransport:1")
+RC = ("/MediaRenderer/RenderingControl/Control", "urn:schemas-upnp-org:service:RenderingControl:1")
+GRC = ("/MediaRenderer/GroupRenderingControl/Control", "urn:schemas-upnp-org:service:GroupRenderingControl:1")
+ZGT = ("/ZoneGroupTopology/Control", "urn:schemas-upnp-org:service:ZoneGroupTopology:1")
+CD = ("/MediaServer/ContentDirectory/Control", "urn:schemas-upnp-org:service:ContentDirectory:1")
+
+NS = {
+    "dc": "http://purl.org/dc/elements/1.1/",
+    "upnp": "urn:schemas-upnp-org:metadata-1-0/upnp/",
+    "r": "urn:schemas-rinconnetworks-com:metadata-1-0/",
+    "didl": "urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/",
+}
+
+
+class SoapFault(Exception):
+    def __init__(self, message, code=None):
+        super().__init__(message)
+        self.code = code
+
+
+class Unreachable(Exception):
+    pass
+
+
+class NothingToResume(Exception):
+    pass
+
+
+# ---------- helpers ----------
+
+def cache_path():
+    base = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
+    return os.path.join(base, "pieter.sonos", "players.json")
+
+
+def load_cache():
+    try:
+        with open(cache_path(), encoding="utf-8") as f:
+            data = json.load(f)
+        hosts = [h for h in data.get("hosts", []) if valid_host(h)]
+        players = {k: v for k, v in data.get("players", {}).items() if GROUP_ID.match(k) and valid_host(v)}
+        return hosts[:64], players
+    except (OSError, ValueError, AttributeError):
+        return [], {}
+
+
+def save_cache(hosts, players):
+    path = cache_path()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"hosts": sorted(set(hosts)), "players": players}, f)
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def before_tv_path():
+    return os.path.join(os.path.dirname(cache_path()), "before-tv.json")
+
+
+def load_before_tv():
+    try:
+        with open(before_tv_path(), encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_before_tv(group_id, uri, meta):
+    """Remember the source a group played before it switched to the TV input."""
+    data = {k: v for k, v in load_before_tv().items() if GROUP_ID.match(k)}
+    data[group_id] = {"uri": uri[:2048], "meta": meta[:MAX_BODY // 8]}
+    path = before_tv_path()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(dict(list(data.items())[-MAX_GROUPS:]), f)
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def valid_host(value):
+    """Only private IPv4 addresses: the helper never talks beyond the LAN."""
+    try:
+        ip = ipaddress.ip_address(str(value))
+    except ValueError:
+        return False
+    return ip.version == 4 and ip.is_private and not ip.is_loopback
+
+
+def clean(value, limit=MAX_TEXT):
+    s = re.sub(r"[\x00-\x1f\x7f-\x9f]", "", str(value or "")).strip()
+    return s[:limit]
+
+
+def hms_to_seconds(value):
+    m = re.match(r"^(\d{1,3}):(\d{2}):(\d{2})", str(value or ""))
+    if not m:
+        return 0
+    return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + int(m.group(3))
+
+
+def seconds_to_hms(sec):
+    sec = max(0, int(sec))
+    return "%d:%02d:%02d" % (sec // 3600, (sec % 3600) // 60, sec % 60)
+
+
+def host_of(location):
+    m = re.match(r"^http://([0-9.]{7,15}):1400/", str(location or ""))
+    return m.group(1) if m and valid_host(m.group(1)) else None
+
+
+# ---------- SOAP ----------
+
+def soap(host, service, action, args=(), timeout=TIMEOUT):
+    if not valid_host(host):
+        raise Unreachable(host)
+    path, urn = service
+    body = "".join("<%s>%s</%s>" % (k, escape(str(v)), k) for k, v in args)
+    envelope = (
+        '<?xml version="1.0" encoding="utf-8"?>'
+        '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" '
+        's:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body>'
+        '<u:%s xmlns:u="%s">%s</u:%s></s:Body></s:Envelope>' % (action, urn, body, action)
+    ).encode("utf-8")
+    req = urllib.request.Request(
+        "http://%s:%d%s" % (host, PORT, path),
+        data=envelope,
+        headers={"Content-Type": 'text/xml; charset="utf-8"', "SOAPACTION": '"%s#%s"' % (urn, action)},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read(MAX_BODY)
+    except urllib.error.HTTPError as e:
+        try:
+            m = re.search(rb"<errorCode>(\d{1,4})</errorCode>", e.read(8192))
+        except OSError:
+            m = None
+        code = m.group(1).decode() if m else None
+        raise SoapFault("%s %s: HTTP %d, UPnP error %s" % (action, host, e.code, code or "?"), code)
+    except (urllib.error.URLError, OSError) as e:
+        raise Unreachable("%s: %s" % (host, e))
+    try:
+        root = ET.fromstring(raw)
+    except ET.ParseError:
+        raise SoapFault("%s: bad response" % action)
+    out = {}
+    for el in root.iter():
+        if el.tag.endswith("Response"):
+            for child in el:
+                out[child.tag] = child.text or ""
+            break
+    return out
+
+
+def didl(text):
+    """First <item> (or <container>) of a DIDL-Lite document, or None."""
+    if not text or text == "NOT_IMPLEMENTED":
+        return None
+    try:
+        root = ET.fromstring(text)
+    except ET.ParseError:
+        return None
+    item = root.find("didl:item", NS)
+    return item if item is not None else root.find("didl:container", NS)
+
+
+def didl_text(item, tag):
+    if item is None:
+        return ""
+    el = item.find(tag, NS)
+    return clean(el.text if el is not None else "")
+
+
+# ---------- discovery and topology ----------
+
+def ssdp_discover(wait=1.5):
+    msg = (
+        "M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: \"ssdp:discover\"\r\n"
+        "MX: 1\r\nST: urn:schemas-upnp-org:device:ZonePlayer:1\r\n\r\n"
+    ).encode()
+    found = set()
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    try:
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
+        sock.settimeout(0.3)
+        sock.sendto(msg, ("239.255.255.250", 1900))
+        deadline = time.monotonic() + wait
+        while time.monotonic() < deadline:
+            try:
+                data, (addr, _) = sock.recvfrom(4096)
+            except socket.timeout:
+                continue
+            if b"Sonos" in data and valid_host(addr):
+                found.add(addr)
+    except OSError:
+        pass
+    finally:
+        sock.close()
+    return found
+
+
+def mdns_discover():
+    try:
+        out = subprocess.run(
+            ["avahi-browse", "-rtp", "_sonos._tcp"],
+            capture_output=True, text=True, timeout=5, check=False,
+        ).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return set()
+    found = set()
+    for line in out.splitlines()[:256]:
+        parts = line.split(";")
+        if len(parts) > 7 and parts[0] == "=" and parts[2] == "IPv4" and valid_host(parts[7]):
+            found.add(parts[7])
+    return found
+
+
+def parse_topology(state_xml):
+    try:
+        root = ET.fromstring(state_xml)
+    except ET.ParseError:
+        return [], {}
+    groups, players = [], {}
+    for zg in root.iter("ZoneGroup"):
+        coord = zg.get("Coordinator", "")
+        members, speakers, coord_host = [], 0, None
+        for m in zg.findall("ZoneGroupMember"):
+            uuid, host = m.get("UUID", ""), host_of(m.get("Location"))
+            if GROUP_ID.match(uuid) and host:
+                players[uuid] = host
+            if m.get("Invisible") == "1":
+                continue
+            speakers += 1 + len(m.findall("Satellite"))
+            members.append(clean(m.get("ZoneName"), 60))
+            if uuid == coord:
+                coord_host = host
+        if GROUP_ID.match(coord) and coord_host and members:
+            groups.append({"id": coord, "host": coord_host, "members": members, "speakers": speakers})
+    return groups[:MAX_GROUPS], players
+
+
+def topology():
+    """Room groups, asking cached players first, then mDNS, then SSDP."""
+    cached, _ = load_cache()
+    tried = set()
+    for finder in (lambda: cached, mdns_discover, ssdp_discover):
+        for host in finder():
+            if host in tried:
+                continue
+            tried.add(host)
+            try:
+                res = soap(host, ZGT, "GetZoneGroupState")
+            except (Unreachable, SoapFault):
+                continue
+            groups, players = parse_topology(res.get("ZoneGroupState", ""))
+            if groups:
+                save_cache(list(players.values()), players)
+                return groups
+    return []
+
+
+def group_host(group_id):
+    if not GROUP_ID.match(group_id or ""):
+        raise SystemExit("invalid group id")
+    _, players = load_cache()
+    if group_id in players:
+        return players[group_id]
+    for g in topology():
+        if g["id"] == group_id:
+            return g["host"]
+    raise Unreachable(group_id)
+
+
+# ---------- status ----------
+
+def source_of(uri):
+    uri = uri or ""
+    if uri.startswith("x-sonos-htastream:"):
+        return "tv"
+    if uri.startswith("x-rincon-stream:"):
+        return "linein"
+    if uri.startswith("x-sonos-vli:"):
+        return "airplay"  # AirPlay (or Spotify Connect) pushed from another device
+    if uri.startswith("x-rincon-queue:"):
+        return "queue"
+    if uri.startswith(("x-rincon-mp3radio:", "x-sonosapi-stream:", "x-sonosapi-radio:", "aac:", "x-sonosapi-hls:")):
+        return "radio"
+    if uri:
+        return "stream"
+    return "none"
+
+
+def safe(fn, *a, default=None):
+    try:
+        return fn(*a)
+    except (Unreachable, SoapFault):
+        return default
+
+
+def int_or(value, default=None):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def group_status(g):
+    host = g["host"]
+    i0 = [("InstanceID", 0)]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=7) as pool:
+        f_transport = pool.submit(safe, soap, host, AVT, "GetTransportInfo", i0)
+        f_position = pool.submit(safe, soap, host, AVT, "GetPositionInfo", i0)
+        f_media = pool.submit(safe, soap, host, AVT, "GetMediaInfo", i0)
+        f_volume = pool.submit(safe, soap, host, GRC, "GetGroupVolume", i0)
+        f_mute = pool.submit(safe, soap, host, GRC, "GetGroupMute", i0)
+        # Home-theatre settings; players without them answer with a SOAP fault.
+        f_night = pool.submit(safe, soap, host, RC, "GetEQ", i0 + [("EQType", "NightMode")])
+        f_speech = pool.submit(safe, soap, host, RC, "GetEQ", i0 + [("EQType", "DialogLevel")])
+    transport = f_transport.result()
+    if transport is None:
+        return None
+    position = f_position.result() or {}
+    media = f_media.result() or {}
+    volume = f_volume.result() or {}
+    mute = f_mute.result() or {}
+    night = f_night.result()
+    speech = f_speech.result()
+
+    # Remember the music source, so leaving the TV input can resume it even
+    # when the TV (not this widget) switched the player over.
+    uri = media.get("CurrentURI") or ""
+    if uri and source_of(uri) not in ("tv", "none", "airplay"):
+        if (load_before_tv().get(g["id"]) or {}).get("uri") != uri[:2048]:
+            save_before_tv(g["id"], uri, media.get("CurrentURIMetaData") or "")
+
+    track = didl(position.get("TrackMetaData"))
+    station = didl(media.get("CurrentURIMetaData"))
+    source = source_of(media.get("CurrentURI"))
+
+    title = didl_text(track, "dc:title")
+    artist = didl_text(track, "dc:creator")
+    stream = didl_text(track, "r:streamContent")
+    if source == "radio" and stream:
+        # Radio puts "Artist - Title" in streamContent and the station in title.
+        a, sep, t = stream.partition(" - ")
+        artist, title = (a, t) if sep else ("", stream)
+
+    art = didl_text(track, "upnp:albumArtURI")
+    # Artwork is only ever loaded from the player itself, which proxies streaming art.
+    art = "http://%s:%d%s" % (host, PORT, art) if art.startswith("/") and len(art) < 2048 else ""
+
+    return {
+        "id": g["id"],
+        "members": g["members"],
+        "speakers": g["speakers"],
+        "state": clean(transport.get("CurrentTransportState"), 32),
+        "source": source,
+        "title": title,
+        "artist": artist,
+        "album": didl_text(track, "upnp:album"),
+        "station": didl_text(station, "dc:title") if source == "radio" else "",
+        "art": art,
+        "position": hms_to_seconds(position.get("RelTime")),
+        "duration": hms_to_seconds(position.get("TrackDuration")),
+        "volume": int_or(volume.get("CurrentVolume")),
+        "muted": mute.get("CurrentMute") == "1",
+        "nightMode": None if night is None else night.get("CurrentValue") == "1",
+        "speech": None if speech is None else speech.get("CurrentValue") == "1",
+    }
+
+
+def cmd_status():
+    groups = topology()
+    if not groups:
+        return {"ok": False, "groups": []}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(group_status, groups))
+    return {"ok": True, "groups": [r for r in results if r]}
+
+
+# ---------- favorites ----------
+
+def browse_favorites(host):
+    res = soap(host, CD, "Browse", [
+        ("ObjectID", "FV:2"), ("BrowseFlag", "BrowseDirectChildren"), ("Filter", "*"),
+        ("StartingIndex", 0), ("RequestedCount", MAX_FAVORITES), ("SortCriteria", ""),
+    ])
+    try:
+        root = ET.fromstring(res.get("Result", ""))
+    except ET.ParseError:
+        return []
+    out = []
+    for item in root.findall("didl:item", NS)[:MAX_FAVORITES]:
+        res_el = item.find("didl:res", NS)
+        md_el = item.find("r:resMD", NS)
+        out.append({
+            "title": didl_text(item, "dc:title"),
+            "description": didl_text(item, "r:description"),
+            "uri": (res_el.text or "") if res_el is not None else "",
+            "meta": (md_el.text or "") if md_el is not None else "",
+        })
+    return out
+
+
+def queue_size(host):
+    res = safe(soap, host, CD, "Browse", [
+        ("ObjectID", "Q:0"), ("BrowseFlag", "BrowseDirectChildren"), ("Filter", "dc:title"),
+        ("StartingIndex", 0), ("RequestedCount", 1), ("SortCriteria", ""),
+    ]) or {}
+    return int_or(res.get("TotalMatches"), 0)
+
+
+def any_host():
+    hosts, _ = load_cache()
+    for host in hosts:
+        if safe(soap, host, AVT, "GetTransportInfo", [("InstanceID", 0)]) is not None:
+            return host
+    groups = topology()
+    if not groups:
+        raise Unreachable("no players")
+    return groups[0]["host"]
+
+
+def cmd_favorites():
+    favs = browse_favorites(any_host())
+    return {"ok": True, "favorites": [{"title": f["title"], "description": f["description"]} for f in favs]}
+
+
+def play_favorite(host, group_id, index):
+    favs = browse_favorites(host)
+    if not 0 <= index < len(favs):
+        raise SystemExit("no such favorite")
+    fav = favs[index]
+    uri, meta = fav["uri"], fav["meta"]
+    if not uri:
+        # Folders such as "Recently Added" have nothing a player can load.
+        raise SoapFault("favorite has no playable item", "714")
+    i0 = [("InstanceID", 0)]
+    slow = SLOW_TIMEOUT
+    if uri.startswith(("x-rincon-cpcontainer:", "x-rincon-playlist:", "file:///jffs/settings/savedqueues")):
+        # Albums and playlists play through the queue.
+        soap(host, AVT, "RemoveAllTracksFromQueue", i0, timeout=slow)
+        soap(host, AVT, "AddURIToQueue", i0 + [
+            ("EnqueuedURI", uri), ("EnqueuedURIMetaData", meta),
+            ("DesiredFirstTrackNumberEnqueued", 0), ("EnqueueAsNext", 0),
+        ], timeout=slow)
+        soap(host, AVT, "SetAVTransportURI", i0 + [
+            ("CurrentURI", "x-rincon-queue:%s#0" % group_id), ("CurrentURIMetaData", ""),
+        ], timeout=slow)
+    else:
+        soap(host, AVT, "SetAVTransportURI", i0 + [("CurrentURI", uri), ("CurrentURIMetaData", meta)], timeout=slow)
+    soap(host, AVT, "Play", i0 + [("Speed", 1)], timeout=slow)
+
+
+# ---------- this PC's audio: per-app routing over AirPlay ----------
+# PipeWire (pipewire-zeroconf, raop-discover) makes each AirPlay player an
+# output named raop_sink.Sonos-<MAC>.local.<ip>.7000; a group's coordinator id
+# is RINCON_<MAC><port>, which ties the two together.
+
+MAX_APPS = 32
+
+
+def pactl_json(*args):
+    try:
+        out = subprocess.run(["pactl", "-f", "json"] + list(args), capture_output=True,
+                             text=True, timeout=4, check=False).stdout
+        data = json.loads(out[:MAX_BODY])
+        return data if isinstance(data, list) else []
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return []
+
+
+def pactl(*args):
+    try:
+        return subprocess.run(["pactl"] + list(args), capture_output=True, text=True,
+                              timeout=4, check=False).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def sonos_sink(group_id):
+    mac = group_id[7:19]
+    for sink in pactl_json("list", "sinks"):
+        name = str(sink.get("name") or "")
+        if name.startswith("raop_sink.") and ("-" + mac + ".") in name:
+            return sink
+    return None
+
+
+def pc_sink():
+    """Where an app goes back to: the default output, unless that is an AirPlay one."""
+    try:
+        default = subprocess.run(["pactl", "get-default-sink"], capture_output=True, text=True,
+                                 timeout=4, check=False).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        default = ""
+    sinks = pactl_json("list", "sinks")
+    names = [str(x.get("name") or "") for x in sinks]
+    if default in names and not default.startswith("raop_sink."):
+        return default
+    # No usable default: Bluetooth, then speakers, then headphones, then anything local.
+    for test in (lambda n: n.startswith("bluez_output."), lambda n: "speaker" in n.lower(),
+                 lambda n: "headphone" in n.lower(), lambda n: not n.startswith("raop_sink.")):
+        for name in names:
+            if test(name) and not name.startswith("raop_sink."):
+                return name
+    return None
+
+
+def app_name(stream):
+    props = stream.get("properties") or {}
+    return clean(props.get("application.name") or props.get("application.process.binary"), 60)
+
+
+def cmd_apps(group_id):
+    sink = sonos_sink(group_id)
+    if not sink:
+        return {"ok": False, "apps": []}
+    apps = {}
+    for st in pactl_json("list", "sink-inputs"):
+        props = st.get("properties") or {}
+        name = app_name(st)
+        # Skip unnamed streams and short event sounds (notifications, clicks).
+        if not name or props.get("media.role") == "event":
+            continue
+        if name not in apps and len(apps) >= MAX_APPS:
+            continue
+        a = apps.setdefault(name, {"name": name, "onSonos": False, "playing": False})
+        if st.get("sink") == sink.get("index"):
+            a["onSonos"] = True
+        if not st.get("corked"):
+            a["playing"] = True
+    return {"ok": True, "sink": clean(sink.get("description"), 60),
+            "apps": sorted(apps.values(), key=lambda a: a["name"].lower())}
+
+
+def cmd_send(group_id, name, on):
+    target = sonos_sink(group_id) if on == "1" else None
+    target_name = target.get("name") if target else pc_sink()
+    if not target_name:
+        raise Unreachable("no output to send to")
+    moved = 0
+    for st in pactl_json("list", "sink-inputs"):
+        if app_name(st) == name and pactl("move-sink-input", str(int(st.get("index"))), target_name):
+            moved += 1
+    if moved == 0:
+        raise SoapFault("no audio from %s to move" % name)
+
+
+# ---------- actions ----------
+
+def flag(value):
+    if value not in ("0", "1"):
+        raise SystemExit("expected 0 or 1")
+    return value
+
+
+def bounded_int(value, lo, hi):
+    n = int_or(value)
+    if n is None:
+        raise SystemExit("expected a number")
+    return max(lo, min(hi, n))
+
+
+def run_action(action, group_id, arg):
+    host = group_host(group_id)
+    i0 = [("InstanceID", 0)]
+    if action == "play":
+        soap(host, AVT, "Play", i0 + [("Speed", 1)])
+    elif action == "pause":
+        soap(host, AVT, "Pause", i0)
+    elif action == "toggle":
+        state = soap(host, AVT, "GetTransportInfo", i0).get("CurrentTransportState")
+        if state == "PLAYING":
+            try:
+                soap(host, AVT, "Pause", i0)
+            except SoapFault:
+                soap(host, AVT, "Stop", i0)  # TV and radio streams cannot pause
+        else:
+            soap(host, AVT, "Play", i0 + [("Speed", 1)])
+    elif action == "next":
+        soap(host, AVT, "Next", i0)
+    elif action == "previous":
+        soap(host, AVT, "Previous", i0)
+    elif action == "seek":
+        soap(host, AVT, "Seek", i0 + [("Unit", "REL_TIME"), ("Target", seconds_to_hms(bounded_int(arg, 0, 86400)))])
+    elif action == "tv":
+        media = safe(soap, host, AVT, "GetMediaInfo", i0) or {}
+        uri = media.get("CurrentURI") or ""
+        if uri and source_of(uri) != "tv":
+            save_before_tv(group_id, uri, media.get("CurrentURIMetaData") or "")
+        soap(host, AVT, "SetAVTransportURI", i0 + [
+            ("CurrentURI", "x-sonos-htastream:%s:spdif" % group_id), ("CurrentURIMetaData", ""),
+        ])
+        safe(soap, host, AVT, "Play", i0 + [("Speed", 1)])
+    elif action == "music":
+        saved = load_before_tv().get(group_id) or {}
+        uri, meta = str(saved.get("uri") or ""), str(saved.get("meta") or "")
+        if not uri or source_of(uri) in ("tv", "queue", "airplay"):
+            # Nothing remembered (e.g. the TV woke the Beam): fall back to the queue.
+            uri, meta = "x-rincon-queue:%s#0" % group_id, ""
+        if source_of(uri) == "queue" and queue_size(host) == 0:
+            # An empty queue can't play; leave the TV input alone and say so.
+            raise NothingToResume(group_id)
+        soap(host, AVT, "SetAVTransportURI", i0 + [("CurrentURI", uri), ("CurrentURIMetaData", meta)], timeout=SLOW_TIMEOUT)
+        soap(host, AVT, "Play", i0 + [("Speed", 1)], timeout=SLOW_TIMEOUT)
+    elif action == "volume":
+        soap(host, GRC, "SnapshotGroupVolume", i0)
+        soap(host, GRC, "SetGroupVolume", i0 + [("DesiredVolume", bounded_int(arg, 0, 100))])
+    elif action == "volume-rel":
+        soap(host, GRC, "SnapshotGroupVolume", i0)
+        soap(host, GRC, "SetRelativeGroupVolume", i0 + [("Adjustment", bounded_int(arg, -100, 100))])
+    elif action == "mute":
+        soap(host, GRC, "SetGroupMute", i0 + [("DesiredMute", flag(arg))])
+    elif action == "night":
+        soap(host, RC, "SetEQ", i0 + [("EQType", "NightMode"), ("DesiredValue", flag(arg))])
+    elif action == "speech":
+        soap(host, RC, "SetEQ", i0 + [("EQType", "DialogLevel"), ("DesiredValue", flag(arg))])
+    elif action == "favorite":
+        play_favorite(host, group_id, bounded_int(arg, 0, MAX_FAVORITES - 1))
+
+
+ACTIONS = {"play", "pause", "toggle", "next", "previous", "seek", "tv", "music", "volume",
+           "volume-rel", "mute", "night", "speech", "favorite"}
+
+
+def main(argv):
+    if not argv or argv[0] in ("-h", "--help"):
+        print(__doc__.strip())
+        return 0
+    cmd = argv[0]
+    try:
+        if cmd == "status":
+            print(json.dumps(cmd_status()))
+            return 0
+        if cmd == "apps" and len(argv) == 2 and GROUP_ID.match(argv[1]):
+            print(json.dumps(cmd_apps(argv[1])))
+            return 0
+        if cmd == "send" and len(argv) == 4 and GROUP_ID.match(argv[1]):
+            cmd_send(argv[1], clean(argv[2], 60), flag(argv[3]))
+            return 0
+        if cmd == "favorites":
+            print(json.dumps(cmd_favorites()))
+            return 0
+        if cmd in ACTIONS and len(argv) >= 2:
+            run_action(cmd, argv[1], argv[2] if len(argv) > 2 else None)
+            return 0
+    except Unreachable as e:
+        if cmd in ("status", "favorites"):
+            print(json.dumps({"ok": False, "groups": [], "favorites": []}))
+            return 0
+        print("sonos: unreachable: %s" % e, file=sys.stderr)
+        return 2
+    except NothingToResume:
+        print("sonos: nothing to resume (queue empty)", file=sys.stderr)
+        return 5
+    except SoapFault as e:
+        print("sonos: %s" % e, file=sys.stderr)
+        # 4 tells the widget the music service refused, not the speaker.
+        return 4 if e.code in SERVICE_ERRORS else 3
+    print("usage: sonos status | favorites | <action> <group-id> [arg]", file=sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
