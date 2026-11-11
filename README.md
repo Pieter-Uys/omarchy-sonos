@@ -1,6 +1,25 @@
-# Sonos (pieter.sonos)
+# Sonos for Omarchy
 
-Control the Sonos speakers on your network from the Omarchy bar, without the Sonos app.
+Control the Sonos speakers on your network from the [Omarchy](https://omarchy.org)
+bar, without the Sonos app. Works with any Sonos system: speakers are found
+automatically, nothing needs configuring.
+
+## Install
+
+```sh
+omarchy plugin add https://github.com/Pieter-Uys/omarchy-sonos --enable
+```
+
+It is added to the tray drawer by default; move it with
+`omarchy bar move sonos --section right` (or pick a section when asked).
+Update later with `omarchy plugin update sonos`.
+
+**Requirements:** Python 3 (standard library only) and, for finding speakers,
+`avahi-browse` (the `avahi` package; Omarchy ships it). Your PC must be on the
+same network as the speakers. The optional *Play on Sonos* feature needs PipeWire
+AirPlay support; see below.
+
+## Features
 
 - **Bar icon** (speaker): click to open the panel, middle-click to play/pause,
   right-click to mute, scroll to change the volume. Dimmed when no speakers are found;
@@ -11,13 +30,13 @@ Control the Sonos speakers on your network from the Omarchy bar, without the Son
   Your Sonos Favorites are listed underneath; click one to play it. If a favorite
   can't play (its music service is signed out on the Sonos, or it's a folder),
   the panel says so instead of silently doing nothing.
+  With more than one room group, a row of room chips picks which one to control.
 - **TV button** toggles: switch to the TV input, then back to whatever played
   before (remembered even when the TV switched the player over by itself).
 - **Play on Sonos**: lists the apps playing sound on this PC, each with a switch
   that sends just that app to the Sonos over AirPlay (see below). Spotify can go
   to the Sonos while notifications and the browser stay on your PC speakers;
   WirePlumber remembers the choice per app.
-  With more than one room group, a row of room chips picks which one to control.
 - **Keyboard** (panel open): Enter plays/pauses, Up/Down change volume,
   Left/Right skip tracks, Esc closes.
 
@@ -25,7 +44,7 @@ Control the Sonos speakers on your network from the Omarchy bar, without the Son
 
 `bin/sonos` (Python 3, standard library only) speaks the players' local UPnP
 control API on port 1400. Players are found with mDNS (`avahi-browse`), falling
-back to SSDP, and the addresses are cached in `~/.cache/pieter.sonos/players.json`.
+back to SSDP, and the addresses are cached in `~/.cache/sonos/players.json`.
 It only talks to private IPv4 addresses and never reaches the internet; album
 art is loaded only from the player itself. No Sonos account is involved.
 
@@ -39,7 +58,7 @@ bin/sonos toggle RINCON_…        # play/pause a group (id from status)
 bin/sonos volume RINCON_… 25
 ```
 
-IPC: `omarchy-shell pieter.sonos toggle | playPause | next | previous | volumeUp | volumeDown | mute`.
+IPC: `omarchy-shell sonos toggle | playPause | next | previous | volumeUp | volumeDown | mute`.
 
 ## Sending PC audio to the Sonos (AirPlay)
 
@@ -78,5 +97,5 @@ bin/sonos tv RINCON_… / music RINCON_…
 ## Tests
 
 ```sh
-node --test ~/.config/omarchy/plugins/pieter.sonos/tests/
+node --test ~/.config/omarchy/plugins/sonos/tests/
 ```

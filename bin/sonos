@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Local Sonos control for the pieter.sonos bar widget.
+"""Local Sonos control for the sonos bar widget.
 
 Talks only to Sonos players on the local network, over their UPnP control
 port (1400). No cloud account, no internet access. Players are found with
 mDNS (avahi-browse), falling back to SSDP, and remembered in
-$XDG_CACHE_HOME/pieter.sonos/players.json so later calls skip discovery.
+$XDG_CACHE_HOME/sonos/players.json so later calls skip discovery.
 
   sonos status                      JSON: every room group and what it is doing
   sonos favorites                   JSON: the household's Sonos Favorites
@@ -86,7 +86,7 @@ class NothingToResume(Exception):
 
 def cache_path():
     base = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
-    return os.path.join(base, "pieter.sonos", "players.json")
+    return os.path.join(base, "sonos", "players.json")
 
 
 def load_cache():

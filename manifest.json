@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
-  "id": "pieter.sonos",
+  "id": "sonos",
   "name": "Sonos",
-  "version": "1.1.0",
-  "author": "Pieter",
+  "version": "1.2.0",
+  "author": "Pieter Uys",
   "license": "MIT",
   "description": "Control the Sonos speakers on your network from the bar: now playing, play/pause, skip, volume, TV input, Night Sound and Speech Enhancement, and one-click Sonos Favorites. Talks only to players on the local network (UPnP, port 1400); no Sonos account or cloud. Polls the players every few seconds.",
   "kinds": [

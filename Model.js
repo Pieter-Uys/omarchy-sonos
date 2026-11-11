@@ -1,4 +1,4 @@
-// Pure parsing and formatting helpers for pieter.sonos.
+// Pure parsing and formatting helpers for sonos.
 // Everything from the helper (and so from the speakers) is untrusted: it is
 // bounded and validated here, and the QML renders it as plain text only.
 

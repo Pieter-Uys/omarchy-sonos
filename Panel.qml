@@ -15,8 +15,8 @@ import "Model.js" as Model
 // mutes, scroll changes the volume.
 Panel {
   id: root
-  moduleName: "pieter.sonos"
-  ipcTarget: "pieter.sonos"
+  moduleName: "sonos"
+  ipcTarget: "sonos"
   manageIpc: false
 
   readonly property string helperPath: String(Qt.resolvedUrl("bin/sonos")).replace(/^file:\/\//, "")
@@ -318,7 +318,7 @@ Panel {
   onOpenedChanged: if (opened) { refresh(); refreshFavorites(); refreshApps() }
 
   ShellIpc {
-    target: "pieter.sonos"
+    target: "sonos"
     function open() { root.open() }
     function close() { root.close() }
     function show() { root.open() }

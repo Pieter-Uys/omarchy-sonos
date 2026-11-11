@@ -1,4 +1,4 @@
-// Run with: node --test ~/.config/omarchy/plugins/pieter.sonos/tests/
+// Run with: node --test ~/.config/omarchy/plugins/sonos/tests/
 const test = require("node:test")
 const assert = require("node:assert")
 const fs = require("node:fs")
