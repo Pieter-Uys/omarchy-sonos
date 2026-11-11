@@ -26,7 +26,6 @@
   "nightSoundDetail": "Quieter loud bits, clearer quiet ones",
   "speech": "Speech Enhancement",
   "speechDetail": "Make dialogue easier to hear",
-  "favorites": "Favorites",
   "noFavorites": "No Sonos Favorites yet",
   "loading": "Loading…",
   "untitled": "Untitled",
@@ -40,9 +39,28 @@
   "musicResumeError": "Switched off TV, but there was nothing to resume. Pick a favorite below.",
   "nothingToResume": "Nothing to go back to: your Sonos queue is empty. Pick a favorite below to switch from TV to music.",
   "airplay": "AirPlay",
-  "playOnSonos": "Play on Sonos",
   "noApps": "No apps are playing sound on this PC. Start one (Spotify, a browser tab…) and it shows up here.",
   "appOnSonos": "Playing on %1",
   "appOnPc": "Playing on this PC",
-  "sendError": "Couldn't move that app's audio. It may have just stopped playing."
+  "sendError": "Couldn't move that app's audio. It may have just stopped playing.",
+  "layoutFull": "Full",
+  "layoutMinimal": "Minimal",
+  "layoutTip": "Switch between the full panel (tabs) and a minimal one (collapsed sections)",
+  "tabFavorites": "Favorites",
+  "tabTv": "TV",
+  "tabPc": "This PC",
+  "summaryOn": "On",
+  "summaryOff": "Off",
+  "summaryOnSonos": {
+    "one": "%1 on Sonos",
+    "other": "%1 on Sonos"
+  },
+  "sourceRadio": "Radio",
+  "pcHint": "Only the apps switched on here play on %1. Everything else stays on this PC.",
+  "favFolder": "Folder",
+  "favOffline": "Offline",
+  "favSignedOut": "Sign in on Sonos",
+  "favFailed": "Didn't play",
+  "favFolderNotice": "%1 is a folder, so there's nothing to play. Open it in the Sonos app.",
+  "favOfflineNotice": "%1 points to a stream that isn't running any more."
 }

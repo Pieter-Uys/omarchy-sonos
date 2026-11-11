@@ -315,7 +315,8 @@ Panel {
     onTriggered: root.nowMs = Date.now()
   }
 
-  onOpenedChanged: if (opened) { refresh(); refreshFavorites(); refreshApps() }
+  onOpenedChanged: if (opened) { tabPicked = false; syncTab(); refresh(); refreshFavorites(); refreshApps() }
+  onGroupChanged: syncTab()
 
   ShellIpc {
     target: "sonos"
@@ -382,6 +383,95 @@ Panel {
     }
   }
 
+  // ---------- layout: full (source tabs) or minimal (collapsed sections) ----------
+
+  readonly property string glyphChevronDown: String.fromCodePoint(0xF0140)
+  readonly property string glyphChevronRight: String.fromCodePoint(0xF0142)
+
+  // Applied locally first so the panel redraws on the click, then written to
+  // this widget's shell.json entry so it sticks (same as the built-in panels).
+  property string layoutOverride: ""
+  readonly property string layout: {
+    var v = root.layoutOverride !== "" ? root.layoutOverride : String(setting("layout", "full"))
+    return v === "minimal" ? "minimal" : "full"
+  }
+  function setLayout(value) {
+    root.layoutOverride = value
+    var entry = { id: root.moduleName }
+    for (var key in root.settings) if (key !== "id") entry[key] = root.settings[key]
+    entry.layout = value
+    root.settings = entry
+    if (root.bar && root.bar.shell && typeof root.bar.shell.updateEntryInline === "function")
+      root.bar.shell.updateEntryInline(root.moduleName, entry)
+  }
+
+  readonly property bool hasTv: Model.isHomeTheatre(root.group)
+  readonly property bool hasPc: root.pcAudio.ok
+  readonly property var sections: {
+    var out = [{ key: "favorites", label: strings.t("tabFavorites") }]
+    if (root.hasTv) out.push({ key: "tv", label: strings.t("tabTv") })
+    if (root.hasPc) out.push({ key: "pc", label: strings.t("tabPc") })
+    return out
+  }
+
+  // Full layout: the open tab. It follows what is playing until picked by hand.
+  property string tab: "favorites"
+  property bool tabPicked: false
+  function syncTab() {
+    if (!root.tabPicked) root.tab = Model.tabFor(root.group, root.hasTv, root.hasPc)
+  }
+  readonly property string shownTab: root.sections.some(function(s) { return s.key === root.tab }) ? root.tab : "favorites"
+  onHasPcChanged: syncTab()
+
+  // Minimal layout: which sections are expanded (all closed to start).
+  property var expanded: ({})
+  function toggleSection(key) {
+    var e = Object.assign({}, root.expanded)
+    e[key] = !e[key]
+    root.expanded = e
+  }
+
+  function sectionSummary(key) {
+    if (key === "favorites")
+      return root.favoritesLoaded ? Commons.I18n.formatNumber(root.favorites.length) : ""
+    if (key === "tv") return root.current("source") === "tv" ? strings.t("summaryOn") : strings.t("summaryOff")
+    if (key === "pc") {
+      var n = 0
+      for (var i = 0; i < root.pcAudio.apps.length; i++) if (root.appOnSonos(root.pcAudio.apps[i])) n++
+      return strings.tn("summaryOnSonos", n).arg(Commons.I18n.formatNumber(n))
+    }
+    return ""
+  }
+
+  function sourceLine() {
+    var g = root.group
+    if (!g) return ""
+    var state = root.stateText(root.current("state"))
+    var kind = Model.sourceKind(g)
+    // TV, line-in and bare AirPlay already name the source in the title.
+    if (kind === "radio") return state + " · " + strings.t("sourceRadio")
+    if (kind === "airplay" && root.nowPlaying.kind === "track") return state + " · " + strings.t("airplay")
+    return state
+  }
+
+  function favoriteClicked(fav) {
+    if (fav.status === "folder" || fav.status === "offline") {
+      root.notice = strings.t(fav.status === "folder" ? "favFolderNotice" : "favOfflineNotice")
+        .arg(fav.title || strings.t("untitled"))
+      noticeTimer.restart()
+      return
+    }
+    root.playFavorite(fav)
+  }
+
+  function favoriteNote(fav) {
+    if (fav.status === "folder") return strings.t("favFolder")
+    if (fav.status === "offline") return strings.t("favOffline")
+    if (fav.status === "signedOut") return strings.t("favSignedOut")
+    if (fav.status === "failed") return strings.t("favFailed")
+    return Model.serviceLabel(fav.description)
+  }
+
   // ---------- panel ----------
 
   KeyboardPanel {
@@ -412,6 +502,7 @@ Panel {
         anchors.top: parent.top
         spacing: Style.space(14)
 
+        // ----- header: room, speaker count, layout switch -----
         PanelHero {
           width: parent.width
           foreground: root.fg
@@ -419,11 +510,19 @@ Panel {
           title: root.group ? Model.groupName(root.group) : strings.t("title")
           meta: root.group
             ? strings.tn("speakers", root.group.speakers).arg(Commons.I18n.formatNumber(root.group.speakers))
-              + " · " + root.stateText(root.current("state"))
             : ""
           iconComponent: PlainText {
             text: root.glyphSpeaker
             font.pixelSize: Style.font.display
+          }
+          trailingControl: Button {
+            visible: !!root.group
+            text: root.layout === "full" ? strings.t("layoutMinimal") : strings.t("layoutFull")
+            tooltipText: strings.t("layoutTip")
+            foreground: root.fg
+            accent: root.accent
+            fontSize: Style.font.caption
+            onClicked: root.setLayout(root.layout === "full" ? "minimal" : "full")
           }
         }
 
@@ -462,7 +561,7 @@ Panel {
           onChanged: function(v) { root.selectedId = v; root.overrides = ({}); root.refresh() }
         }
 
-        // ----- now playing -----
+        // ===== player: now playing, progress, transport, volume =====
         Row {
           visible: !!root.group
           width: parent.width
@@ -492,7 +591,8 @@ Panel {
             PlainText {
               anchors.centerIn: parent
               visible: art.status !== Image.Ready
-              text: root.nowPlaying.kind === "tv" ? root.glyphTv : root.glyphMusic
+              text: root.nowPlaying.kind === "tv" ? root.glyphTv
+                : (root.nowPlaying.kind === "airplay" ? root.glyphSpeaker : root.glyphMusic)
               opacity: 0.5
               font.pixelSize: Style.font.displayLarge
             }
@@ -521,10 +621,18 @@ Panel {
               font.pixelSize: Style.font.bodySmall
               elide: Text.ElideRight
             }
+
+            PlainText {
+              width: parent.width
+              text: root.sourceLine()
+              visible: text !== ""
+              opacity: 0.5
+              font.pixelSize: Style.font.caption
+              elide: Text.ElideRight
+            }
           }
         }
 
-        // ----- progress -----
         Column {
           width: parent.width
           spacing: Style.space(2)
@@ -569,7 +677,6 @@ Panel {
           }
         }
 
-        // ----- transport -----
         Row {
           visible: !!root.group
           anchors.horizontalCenter: parent.horizontalCenter
@@ -606,23 +713,9 @@ Panel {
             opacity: enabled ? 1 : 0.4
             onClicked: root.action("next")
           }
-
-          Button {
-            visible: Model.isHomeTheatre(root.group)
-            iconText: root.glyphTv
-            readonly property bool onTv: root.current("source") === "tv"
-            tooltipText: onTv ? strings.t("switchToMusic") : strings.t("switchToTv")
-            foreground: root.fg
-            accent: root.accent
-            selected: onTv
-            onClicked: {
-              root.override("source", onTv ? "queue" : "tv")
-              root.action(onTv ? "music" : "tv")
-            }
-          }
         }
 
-        // ----- feedback: favorite loading, or why the last command failed -----
+        // Feedback: favorite loading, or why the last command failed.
         PlainText {
           width: parent.width
           visible: text !== ""
@@ -636,7 +729,6 @@ Panel {
           font.pixelSize: Style.font.bodySmall
         }
 
-        // ----- volume -----
         Row {
           visible: !!root.group && root.volume >= 0
           width: parent.width
@@ -679,133 +771,249 @@ Panel {
           }
         }
 
-        // ----- home theatre -----
-        Column {
-          visible: Model.isHomeTheatre(root.group)
-          width: parent.width
-          spacing: Style.space(6)
-
-          Toggle {
-            width: parent.width
-            label: strings.t("nightSound")
-            description: strings.t("nightSoundDetail")
-            checked: root.current("nightMode") === true
-            foreground: root.fg
-            accent: root.accent
-            fontFamily: root.fontFamily
-            onClicked: root.toggleSetting("nightMode", "night")
-          }
-
-          Toggle {
-            visible: !!root.group && root.group.speech !== null
-            width: parent.width
-            label: strings.t("speech")
-            description: strings.t("speechDetail")
-            checked: root.current("speech") === true
-            foreground: root.fg
-            accent: root.accent
-            fontFamily: root.fontFamily
-            onClicked: root.toggleSetting("speech", "speech")
-          }
-        }
-
-        // ----- this PC's apps, sent to the Sonos over AirPlay -----
         PanelSeparator {
-          visible: !!root.group && root.pcAudio.ok
+          visible: !!root.group
           width: parent.width
           foreground: root.fg
         }
 
+        // ===== sources: where the sound comes from =====
+
+        // Full: one tab per source.
         Column {
-          visible: !!root.group && root.pcAudio.ok
+          visible: !!root.group && root.layout === "full"
           width: parent.width
-          spacing: Style.space(6)
+          spacing: Style.space(10)
 
-          PanelSectionHeader {
-            text: strings.t("playOnSonos")
+          ButtonGroup {
+            visible: root.sections.length > 1
             foreground: root.fg
+            accent: root.accent
             fontFamily: root.fontFamily
+            focusable: false
+            value: root.shownTab
+            options: root.sections.map(function(s) { return { value: s.key, label: s.label } })
+            onChanged: function(v) { root.tab = v; root.tabPicked = true }
           }
 
-          PlainText {
-            visible: root.pcAudio.apps.length === 0
+          Loader {
             width: parent.width
-            wrapMode: Text.WordWrap
-            text: strings.t("noApps")
-            opacity: 0.6
-            font.pixelSize: Style.font.bodySmall
+            sourceComponent: root.shownTab === "tv" ? tvSection
+              : (root.shownTab === "pc" ? pcSection : favoritesSection)
           }
+        }
+
+        // Minimal: each source is a one-line row that expands.
+        Column {
+          visible: !!root.group && root.layout === "minimal"
+          width: parent.width
+          spacing: Style.space(2)
 
           Repeater {
-            model: root.pcAudio.apps
+            model: root.sections
 
-            delegate: Toggle {
+            delegate: Column {
               required property var modelData
               width: parent.width
-              label: modelData.name
-              description: root.appOnSonos(modelData)
-                ? strings.t("appOnSonos").arg(root.pcAudio.sink)
-                : strings.t("appOnPc")
-              checked: root.appOnSonos(modelData)
-              foreground: root.fg
-              accent: root.accent
-              fontFamily: root.fontFamily
-              onClicked: root.sendApp(modelData.name, !root.appOnSonos(modelData))
+              spacing: Style.space(6)
+
+              Button {
+                width: parent.width
+                leftAlign: true
+                iconText: root.expanded[modelData.key] ? root.glyphChevronDown : root.glyphChevronRight
+                text: modelData.label
+                foreground: root.fg
+                accent: root.accent
+                fontSize: Style.font.bodySmall
+                onClicked: root.toggleSection(modelData.key)
+
+                PlainText {
+                  anchors.right: parent.right
+                  anchors.rightMargin: Style.spacing.controlPaddingX
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: root.sectionSummary(modelData.key)
+                  opacity: 0.5
+                  font.pixelSize: Style.font.caption
+                }
+              }
+
+              Loader {
+                active: !!root.expanded[modelData.key]
+                visible: active
+                width: parent.width
+                sourceComponent: modelData.key === "tv" ? tvSection
+                  : (modelData.key === "pc" ? pcSection : favoritesSection)
+              }
             }
           }
         }
+      }
+    }
+  }
 
-        // ----- favorites -----
-        PanelSeparator {
-          visible: !!root.group
-          width: parent.width
-          foreground: root.fg
-        }
+  // ---------- source sections (shared by both layouts) ----------
 
-        Column {
-          visible: !!root.group
-          width: parent.width
-          spacing: Style.space(6)
+  Component {
+    id: favoritesSection
 
-          PanelSectionHeader {
-            text: strings.t("favorites")
-            foreground: root.fg
-            fontFamily: root.fontFamily
+    Column {
+      spacing: Style.space(4)
+
+      PlainText {
+        visible: !root.favoritesLoaded || root.favorites.length === 0
+        text: root.favoritesLoaded ? strings.t("noFavorites") : strings.t("loading")
+        opacity: 0.6
+        font.pixelSize: Style.font.bodySmall
+      }
+
+      ListView {
+        id: favList
+        visible: root.favorites.length > 0
+        width: parent.width
+        height: Math.min(contentHeight, Style.space(root.layout === "full" ? 300 : 220))
+        clip: true
+        interactive: contentHeight > height
+        boundsBehavior: Flickable.StopAtBounds
+        spacing: Style.space(1)
+        model: root.favorites
+
+        delegate: Item {
+          id: favRow
+          required property var modelData
+          readonly property bool usable: modelData.status === "ok"
+          readonly property bool pending: root.pendingFavorite === modelData.index
+          width: favList.width
+          height: Style.space(30)
+
+          Rectangle {
+            anchors.fill: parent
+            radius: Style.spacing.labelGap
+            color: favRow.pending ? Style.selectedFillFor(root.fg, root.accent)
+              : (favMouse.containsMouse ? Style.hoverFillFor(root.fg, root.accent) : "transparent")
           }
 
           PlainText {
-            visible: !root.favoritesLoaded || root.favorites.length === 0
-            text: root.favoritesLoaded ? strings.t("noFavorites") : strings.t("loading")
-            opacity: 0.6
+            id: favIcon
+            anchors.left: parent.left
+            anchors.leftMargin: Style.space(8)
+            anchors.verticalCenter: parent.verticalCenter
+            text: Model.isRadioFavorite(favRow.modelData) ? root.glyphRadio : root.glyphAlbum
+            opacity: favRow.usable ? 0.8 : 0.35
+          }
+
+          PlainText {
+            anchors.left: favIcon.right
+            anchors.leftMargin: Style.space(8)
+            anchors.right: favNote.left
+            anchors.rightMargin: Style.space(8)
+            anchors.verticalCenter: parent.verticalCenter
+            text: favRow.modelData.title !== "" ? favRow.modelData.title : strings.t("untitled")
+            elide: Text.ElideRight
             font.pixelSize: Style.font.bodySmall
+            opacity: favRow.usable ? 1 : 0.45
           }
 
-          ListView {
-            id: favList
-            visible: root.favorites.length > 0
-            width: parent.width
-            height: Math.min(contentHeight, Style.space(260))
-            clip: true
-            interactive: contentHeight > height
-            boundsBehavior: Flickable.StopAtBounds
-            spacing: Style.space(2)
-            model: root.favorites
-
-            delegate: Button {
-              required property var modelData
-              width: favList.width
-              leftAlign: true
-              iconText: /radio|station/i.test(modelData.description) ? root.glyphRadio : root.glyphAlbum
-              text: modelData.title !== "" ? modelData.title : strings.t("untitled")
-              tooltipText: modelData.description
-              foreground: root.fg
-              accent: root.accent
-              fontSize: Style.font.bodySmall
-              selected: root.pendingFavorite === modelData.index
-              enabled: root.pendingFavorite < 0
-              onClicked: root.playFavorite(modelData)
-            }
+          PlainText {
+            id: favNote
+            anchors.right: parent.right
+            anchors.rightMargin: Style.space(8)
+            anchors.verticalCenter: parent.verticalCenter
+            width: Math.min(implicitWidth, favRow.width * 0.42)
+            horizontalAlignment: Text.AlignRight
+            elide: Text.ElideRight
+            text: root.favoriteNote(favRow.modelData)
+            color: favRow.usable ? root.fg : Commons.Color.urgent
+            opacity: favRow.usable ? 0.45 : 0.7
+            font.pixelSize: Style.font.caption
           }
+
+          MouseArea {
+            id: favMouse
+            anchors.fill: parent
+            hoverEnabled: true
+            enabled: root.pendingFavorite < 0
+            cursorShape: Qt.PointingHandCursor
+            onClicked: root.favoriteClicked(favRow.modelData)
+          }
+        }
+      }
+    }
+  }
+
+  Component {
+    id: tvSection
+
+    Column {
+      spacing: Style.space(8)
+
+      Button {
+        readonly property bool onTv: root.current("source") === "tv"
+        width: parent.width
+        bordered: true
+        iconText: onTv ? root.glyphMusic : root.glyphTv
+        text: onTv ? strings.t("switchToMusic") : strings.t("switchToTv")
+        foreground: root.fg
+        accent: root.accent
+        onClicked: {
+          root.override("source", onTv ? "queue" : "tv")
+          root.action(onTv ? "music" : "tv")
+        }
+      }
+
+      Toggle {
+        width: parent.width
+        label: strings.t("nightSound")
+        description: strings.t("nightSoundDetail")
+        checked: root.current("nightMode") === true
+        foreground: root.fg
+        accent: root.accent
+        fontFamily: root.fontFamily
+        onClicked: root.toggleSetting("nightMode", "night")
+      }
+
+      Toggle {
+        visible: !!root.group && root.group.speech !== null
+        width: parent.width
+        label: strings.t("speech")
+        description: strings.t("speechDetail")
+        checked: root.current("speech") === true
+        foreground: root.fg
+        accent: root.accent
+        fontFamily: root.fontFamily
+        onClicked: root.toggleSetting("speech", "speech")
+      }
+    }
+  }
+
+  Component {
+    id: pcSection
+
+    Column {
+      spacing: Style.space(6)
+
+      PlainText {
+        width: parent.width
+        wrapMode: Text.WordWrap
+        text: root.pcAudio.apps.length === 0 ? strings.t("noApps") : strings.t("pcHint").arg(root.pcAudio.sink)
+        opacity: 0.6
+        font.pixelSize: Style.font.bodySmall
+      }
+
+      Repeater {
+        model: root.pcAudio.apps
+
+        delegate: Toggle {
+          required property var modelData
+          width: parent.width
+          label: modelData.name
+          description: root.appOnSonos(modelData)
+            ? strings.t("appOnSonos").arg(root.pcAudio.sink)
+            : strings.t("appOnPc")
+          checked: root.appOnSonos(modelData)
+          foreground: root.fg
+          accent: root.accent
+          fontFamily: root.fontFamily
+          onClicked: root.sendApp(modelData.name, !root.appOnSonos(modelData))
         }
       }
     }

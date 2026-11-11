@@ -28,6 +28,7 @@ Every value sent to a player is XML-escaped; nothing is passed to a shell.
 """
 
 import concurrent.futures
+import hashlib
 import ipaddress
 import json
 import os
@@ -483,9 +484,72 @@ def any_host():
     return groups[0]["host"]
 
 
+def failed_path():
+    return os.path.join(os.path.dirname(cache_path()), "favorites-failed.json")
+
+
+def fav_key(uri):
+    return hashlib.sha1(uri.encode("utf-8", "replace")).hexdigest()
+
+
+def load_failed():
+    try:
+        with open(failed_path(), encoding="utf-8") as f:
+            data = json.load(f)
+        return {k: v for k, v in data.items() if re.match(r"^[0-9a-f]{40}$", k)} if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def mark_failed(uri, reason):
+    """Remember that a favorite failed (reason "service" or "error"), or clear it (None)."""
+    data = load_failed()
+    key = fav_key(uri)
+    if reason is None:
+        if key not in data:
+            return
+        data.pop(key)
+    else:
+        data[key] = reason
+    try:
+        os.makedirs(os.path.dirname(failed_path()), exist_ok=True)
+        tmp = failed_path() + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(dict(list(data.items())[-200:]), f)
+        os.replace(tmp, failed_path())
+    except OSError:
+        pass
+
+
+def stream_reachable(uri):
+    """For a plain internet-radio favorite that points at a LAN address (e.g. an
+    old PC audio stream), check that something still listens there."""
+    m = re.match(r"^x-rincon-mp3radio://http://([0-9.]{7,15}):(\d{1,5})/", uri)
+    if not m or not valid_host(m.group(1)):
+        return True
+    try:
+        with socket.create_connection((m.group(1), int(m.group(2))), timeout=0.4):
+            return True
+    except OSError:
+        return False
+
+
+def fav_status(fav, failed):
+    if not fav["uri"]:
+        return "folder"
+    if not stream_reachable(fav["uri"]):
+        return "offline"
+    return {"service": "signedOut", "error": "failed"}.get(failed.get(fav_key(fav["uri"])), "ok")
+
+
 def cmd_favorites():
     favs = browse_favorites(any_host())
-    return {"ok": True, "favorites": [{"title": f["title"], "description": f["description"]} for f in favs]}
+    failed = load_failed()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        states = list(pool.map(lambda f: fav_status(f, failed), favs))
+    return {"ok": True, "favorites": [
+        {"title": f["title"], "description": f["description"], "status": st} for f, st in zip(favs, states)
+    ]}
 
 
 def play_favorite(host, group_id, index):
@@ -494,6 +558,16 @@ def play_favorite(host, group_id, index):
         raise SystemExit("no such favorite")
     fav = favs[index]
     uri, meta = fav["uri"], fav["meta"]
+    try:
+        start_favorite(host, group_id, uri, meta)
+    except SoapFault as e:
+        if uri:
+            mark_failed(uri, "service" if e.code in SERVICE_ERRORS else "error")
+        raise
+    mark_failed(uri, None)
+
+
+def start_favorite(host, group_id, uri, meta):
     if not uri:
         # Folders such as "Recently Added" have nothing a player can load.
         raise SoapFault("favorite has no playable item", "714")

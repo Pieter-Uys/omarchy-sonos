@@ -88,6 +88,10 @@ function parseStatus(raw) {
   return out
 }
 
+// ok: plays; folder: nothing to play; offline: a LAN stream nobody serves any
+// more; signedOut: its music service refused last time; failed: refused otherwise.
+var FAV_STATUSES = ["ok", "folder", "offline", "signedOut", "failed"]
+
 function parseFavorites(raw) {
   var v = parseJson(raw)
   var out = []
@@ -96,7 +100,12 @@ function parseFavorites(raw) {
     var f = v.favorites[i] || {}
     // The index is the favorite's position in the player's list, which the
     // helper uses to play it, so keep it even when the title is blank.
-    out.push({ index: i, title: text(f.title, 80), description: text(f.description, 80) })
+    out.push({
+      index: i,
+      title: text(f.title, 80),
+      description: text(f.description, 80),
+      status: FAV_STATUSES.indexOf(f.status) >= 0 ? f.status : "ok"
+    })
   }
   return out
 }
@@ -212,4 +221,31 @@ function parseApps(raw) {
   out.ok = true
   out.sink = text(v.sink, 60)
   return out
+}
+
+// Short service name for a favorite row: "TuneIn Station" -> "TuneIn",
+// "From Apple Music" -> "Apple Music". Tells duplicates apart.
+function serviceLabel(description) {
+  var d = text(description, 80)
+  d = d.replace(/^From\s+/i, "").replace(/\s+(Radio\s+)?Station$/i, "")
+  return d
+}
+
+function isRadioFavorite(f) {
+  return !!f && /radio|station/i.test(f.description)
+}
+
+// The source tab that matches what the group is playing.
+function tabFor(g, hasTv, hasPc) {
+  if (g && g.source === "tv" && hasTv) return "tv"
+  if (g && g.source === "airplay" && hasPc) return "pc"
+  return "favorites"
+}
+
+// What the source line under the title says.
+function sourceKind(g) {
+  if (!g) return ""
+  if (g.source === "radio") return "radio"
+  if (g.source === "queue") return "queue"
+  return g.source === "none" ? "" : g.source
 }

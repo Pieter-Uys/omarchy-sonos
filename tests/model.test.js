@@ -122,3 +122,27 @@ test("parses the apps that can play on the Sonos", () => {
   assert.strictEqual(M.parseApps("nope").ok, false)
   assert.strictEqual(M.parseApps(JSON.stringify({ ok: false, apps: [] })).ok, false)
 })
+
+test("favorites carry a playability status and a short service label", () => {
+  const raw = JSON.stringify({ favorites: [
+    { title: "Classic FM", description: "TuneIn Station", status: "signedOut" },
+    { title: "Recently Added", description: "From Apple Music", status: "folder" },
+    { title: "Odd", description: "Album by X", status: "<b>evil</b>" }
+  ] })
+  const f = M.parseFavorites(raw)
+  assert.deepStrictEqual(plain(f.map(x => x.status)), ["signedOut", "folder", "ok"])
+  assert.strictEqual(M.serviceLabel("TuneIn Station"), "TuneIn")
+  assert.strictEqual(M.serviceLabel("myTuner Radio Station"), "myTuner")
+  assert.strictEqual(M.serviceLabel("From Apple Music"), "Apple Music")
+  assert.strictEqual(M.serviceLabel("TIDAL Playlist"), "TIDAL Playlist")
+  assert.strictEqual(M.isRadioFavorite(f[0]), true)
+})
+
+test("opens on the source tab that matches what is playing", () => {
+  assert.strictEqual(M.tabFor(group({ source: "tv" }), true, true), "tv")
+  assert.strictEqual(M.tabFor(group({ source: "tv" }), false, true), "favorites")
+  assert.strictEqual(M.tabFor(group({ source: "airplay" }), true, true), "pc")
+  assert.strictEqual(M.tabFor(group({ source: "airplay" }), true, false), "favorites")
+  assert.strictEqual(M.tabFor(group({ source: "radio" }), true, true), "favorites")
+  assert.strictEqual(M.tabFor(null, true, true), "favorites")
+})

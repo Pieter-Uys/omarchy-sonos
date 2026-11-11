@@ -21,22 +21,28 @@ AirPlay support; see below.
 
 ## Features
 
+The panel has two parts: **the player** on top (room, now playing, controls,
+volume) and **sources** underneath, meaning where the sound comes from:
+
+| Source | What's in it |
+|--------|--------------|
+| **Favorites** | Your Sonos Favorites. Each row shows its service (TuneIn, Sonos Radio, Album…) so duplicates are easy to tell apart. Ones that can't play are dimmed with the reason: a folder, an old stream that's offline, or a music service that needs signing in again in the Sonos app (learned the first time it fails). |
+| **TV** (home-theatre players: Beam, Arc, Ray, Playbar…) | Switch to the TV input and back to what played before, plus Night Sound and Speech Enhancement. |
+| **This PC** (needs AirPlay, see below) | A switch per app playing sound on your PC, to send just that app to the Sonos. |
+
+**Full or Minimal**: the button in the panel's header switches layout, and the
+choice is saved. *Full* shows the sources as tabs and opens on the one that
+matches what's playing. *Minimal* shows each source as a one-line row with a
+summary (e.g. "27", "Off", "1 on Sonos") that expands when clicked. It can also
+be set in `shell.json` with `"layout": "minimal"`.
+
+With more than one room group, a row of room buttons picks which one to control.
+If something can't play, the panel says why under the controls instead of
+silently doing nothing.
+
 - **Bar icon** (speaker): click to open the panel, middle-click to play/pause,
-  right-click to mute, scroll to change the volume. Dimmed when no speakers are found;
-  shows a crossed-out speaker when muted.
-- **Panel**: now playing with album art, seek bar, previous / play-pause / next,
-  a TV-input button, group volume with mute, and for home-theatre players
-  (Beam, Arc, Ray, Playbar…) Night Sound and Speech Enhancement toggles.
-  Your Sonos Favorites are listed underneath; click one to play it. If a favorite
-  can't play (its music service is signed out on the Sonos, or it's a folder),
-  the panel says so instead of silently doing nothing.
-  With more than one room group, a row of room chips picks which one to control.
-- **TV button** toggles: switch to the TV input, then back to whatever played
-  before (remembered even when the TV switched the player over by itself).
-- **Play on Sonos**: lists the apps playing sound on this PC, each with a switch
-  that sends just that app to the Sonos over AirPlay (see below). Spotify can go
-  to the Sonos while notifications and the browser stay on your PC speakers;
-  WirePlumber remembers the choice per app.
+  right-click to mute, scroll to change the volume. Dimmed when no speakers are
+  found; crossed out when muted.
 - **Keyboard** (panel open): Enter plays/pauses, Up/Down change volume,
   Left/Right skip tracks, Esc closes.
 
@@ -93,6 +99,7 @@ bin/sonos tv RINCON_… / music RINCON_…
 | `room` | `""` | Room to show when several exist; empty follows whichever is playing |
 | `volumeStep` | `2` | Volume change per scroll notch |
 | `refreshIntervalSec` | `10` | Background poll interval |
+| `layout` | `"full"` | `"full"` (source tabs) or `"minimal"` (collapsed rows); also switchable in the panel |
 
 ## Tests
 
